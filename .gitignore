@@ -1,0 +1,36 @@
+# Credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+runtime_paths.env
+# Datasets, checkpoints, indices and experiment artifacts (including symlinks)
+/data
+/models
+/outputs
+/tmp
+/legacy
+/dist
+# Only the reviewed Web/SEC query snapshots are published under datasets/.
+/datasets/*
+!/datasets/README.md
+!/datasets/manifest.json
+!/datasets/queries/
+/datasets/queries/*
+!/datasets/queries/web/
+!/datasets/queries/sec/
+/datasets/queries/web/*
+/datasets/queries/sec/*
+!/datasets/queries/web/test.parquet
+!/datasets/queries/sec/test.parquet
+# Python and editor artifacts
+.venv*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+._*
+*.orig
+*.before*
+terminal_summary_only.patch

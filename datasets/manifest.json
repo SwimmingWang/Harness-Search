@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "snapshot_date": "2026-09-23",
+  "files": {
+    "queries/web/test.parquet": {
+      "dataset": "web",
+      "split": "test",
+      "rows": 554,
+      "bytes": 257776,
+      "sha256": "3fd12822430730f7f9ef782d8d9053674f6762577182d5251415e7428135ba3b",
+      "provenance": "Local Harness-Search evaluation snapshot; original upstream revision unrecorded."
+    },
+    "queries/sec/test.parquet": {
+      "dataset": "sec",
+      "split": "test",
+      "rows": 691,
+      "bytes": 1040604,
+      "sha256": "5a044a2cc514c3cf37ead6af064b618c1580fba55538cb6fe61675dc21695cb8",
+      "provenance": "Local Harness-Search evaluation snapshot; original upstream revision unrecorded."
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Evaluator + data/index tooling. Python 3.11. Use a separate vLLM environment.
+-r requirements-data.txt
+anthropic==0.72.0
+chromadb==1.4.0
+json-repair==0.55.0
+openai-harmony==0.0.8
+pydantic==2.12.3
+pydantic-settings==2.11.0
+requests>=2.32.5,<3
+structlog==25.5.0
+tenacity==9.1.4
+tinker==0.18.2
+chz==0.4.0
+numpy==2.3.4
+torch==2.11.0
+torchvision==0.26.0
+transformers==4.57.6
+# The evaluated environment used this bundled cookbook revision, not PyPI 0.1.0.
+tinker-cookbook @ git+https://github.com/pat-jj/harness-1.git@8ac4012167858f6478fb2a8fd840e4550e2af161#subdirectory=tinker-cookbook

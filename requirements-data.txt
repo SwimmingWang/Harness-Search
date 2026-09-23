@@ -1,0 +1,10 @@
+# Dataset preparation and local retrieval indexes. Python 3.11.
+datasets==4.3.0
+huggingface-hub==0.36.0
+pyarrow==22.0.0
+bm25s==0.3.10
+PyStemmer==3.1.0
+openai==2.6.1
+qdrant-client==1.19.0
+tiktoken==0.12.0
+tqdm==4.67.1
