@@ -10,7 +10,7 @@ INTENT_MODEL_BASE_URL = os.environ.get(
     "INTENT_MODEL_BASE_URL",
     os.environ.get("JUDGE_BASE_URL", "http://127.0.0.1:8000/v1"),
 ).rstrip("/")
-# The relevance judge and intent planner intentionally share one model.
+# The Relevance Judge and Direction Planner intentionally share one model.
 # Legacy INTENT_MODEL_* names remain accepted as configuration fallbacks.
 RELEVANCE_JUDGE_MODEL_NAME = os.environ.get(
     "RELEVANCE_JUDGE_MODEL_NAME",

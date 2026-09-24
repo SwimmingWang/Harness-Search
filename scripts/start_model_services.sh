@@ -15,7 +15,7 @@ launch() {
     return
   fi
   if model_ready "$port"; then echo "$name already ready on port $port"; return; fi
-  [[ -x "$VLLM" ]] || { echo "Missing vLLM: $VLLM; install requirements-serve.txt in .venv-serve" >&2; exit 2; }
+  [[ -x "$VLLM" ]] || { echo "Missing vLLM: $VLLM; install vllm==0.20.2 in .venv-serve" >&2; exit 2; }
   mkdir -p "$SERVICE_LOG_DIR"
   nohup env VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 \
     "$VLLM" serve "$@" --host 127.0.0.1 --port "$port" --tensor-parallel-size "$TP" \

@@ -131,7 +131,7 @@ def main():
                 except Exception as exc:
                     raise RuntimeError(
                         f"Cannot load {repo}. For restricted releases, use an authorized HF_TOKEN. "
-                        f"Alternatively put the authorized local split at {target / (split + '.parquet')}; see docs/data.md."
+                        f"Alternatively put the authorized local split at {target / (split + '.parquet')}."
                     ) from exc
                 data = choose_split(raw, (split, "train", "test"))
                 missing = {"query_id", "query", "document_ids", "answer"} - set(data.column_names)

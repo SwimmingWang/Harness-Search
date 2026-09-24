@@ -1,2 +1,0 @@
-# Install separately from the evaluator, as documented in README.md.
-vllm==0.20.2

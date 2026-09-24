@@ -2,7 +2,7 @@
 
 The retrieval policy supplies operations and document selections. This agent
 executes the selected retrieval operation, validates and commits its observations,
-annotates candidates through RelevanceJudge, and invokes the intent planner for
+annotates candidates through RelevanceJudge, and invokes the Direction Planner for
 redirect proposals. It never chooses the next operation or approves termination.
 """
 from __future__ import annotations
@@ -381,7 +381,7 @@ class MemoryOperator:
 
 
     def redirect(self, params: Dict, initial: bool = False) -> str:
-        """Use the configured Qwen endpoint to revise the advisory search intent."""
+        """Use the Direction Planner to revise the advisory search intent."""
         reasoning = str(params.get("reasoning", "")).strip()
         if len(reasoning) < 12:
             return "redirect: reasoning is missing or too short."

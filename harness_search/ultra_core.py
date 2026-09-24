@@ -238,7 +238,7 @@ CURATE_SCHEMA = ToolSchema(
 REDIRECT_SCHEMA = ToolSchema(
     name="redirect",
     description=(
-        "Ask the Memory Operator intent planner to update the current search direction. "
+        "Ask the Memory Operator Direction Planner to update the current search direction. "
         "Call this before changing direction, when the active direction is complete or "
         "stalled, or when a new direction should be added. Select at most five documents "
         "found since the previous intent revision and explain your decision. After a "
@@ -364,7 +364,7 @@ def get_system_prompt(query: str) -> str:
     v8d_addendum = _v8d_prompt_addendum()
     v8d_tool_line = ""
     intent_tool_line = (
-        "- **redirect**(doc_ids, reasoning): Ask the Memory Operator intent planner to update "
+        "- **redirect**(doc_ids, reasoning): Ask the Memory Operator Direction Planner to update "
         "the intent before changing search direction. Select at most 5 documents found "
         "since the last intent update. After revision, your next action must be retrieval.\n" if V8D_REDIRECT_TOOL else ""
     )

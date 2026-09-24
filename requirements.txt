@@ -1,5 +1,13 @@
 # Evaluator + data/index tooling. Python 3.11. Use a separate vLLM environment.
--r requirements-data.txt
+datasets==4.3.0
+huggingface-hub==0.36.0
+pyarrow==22.0.0
+bm25s==0.3.10
+PyStemmer==3.1.0
+openai==2.6.1
+qdrant-client==1.19.0
+tiktoken==0.12.0
+tqdm==4.67.1
 anthropic==0.72.0
 chromadb==1.4.0
 json-repair==0.55.0
