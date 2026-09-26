@@ -180,36 +180,9 @@ async def run_single_episode(
     turns = 0
     start = time.time()
     env._turn_trace = []
-    # This is deliberately independent of the environment's semantic turn
-    # budget. Mandatory checkpoint actions can run before the environment's
-    # max-turn termination branch, so a bad state transition could otherwise
-    # keep an episode alive forever. Allow a small checkpoint grace window,
-    # then fail this query instead of blocking the whole evaluation.
-    hard_action_limit = env.max_turns + 12
-
+    # Every proposal (including rejected/malformed ones) consumes one policy turn.
     while True:
-        if turns >= hard_action_limit:
-            logger.error(
-                "episode_hard_action_limit",
-                qid=env.query_id,
-                actions=turns,
-                max_turns=env.max_turns,
-                intent_revision_required=env._intent_revision_required,
-                checkpoint_curate_required=env._checkpoint_curate_required,
-                terminal_curate_required=env._terminal_curate_required,
-                pool=len(env.wm.pool_ids),
-                curated=len(env.wm.curated_ids),
-            )
-            raise RuntimeError(
-                f"Episode exceeded hard action limit ({hard_action_limit}); "
-                "possible checkpoint state loop"
-            )
-        if env._intent_revision_required:
-            required_action = "redirect"
-        elif env._checkpoint_curate_required or env._terminal_curate_required:
-            required_action = "curate"
-        else:
-            required_action = "policy_choice"
+        required_action = env.required_action or "policy_choice"
 
         input_state = env.wm.to_text()
         if required_action in {"redirect", "curate"}:
@@ -231,17 +204,12 @@ async def run_single_episode(
             except Exception:
                 prompt = input_state
 
-        if env._intent_revision_required:
-            ac_with_logprobs = await policy.forced_tool_call(env, "redirect")
-        elif env._checkpoint_curate_required:
-            ac_with_logprobs = await policy.forced_tool_call(env, "curate")
-        elif env._terminal_curate_required:
-            ac_with_logprobs = await policy.forced_tool_call(env, "curate")
+        if required_action in {"redirect", "curate"}:
+            ac_with_logprobs = await policy.forced_tool_call(env, required_action)
+        elif isinstance(policy, ChatRetrievalPolicy):
+            ac_with_logprobs = await policy.action(env)
         else:
-            if isinstance(policy, ChatRetrievalPolicy):
-                ac_with_logprobs = await policy.action(env)
-            else:
-                ac_with_logprobs = await policy(ob, stop_condition)
+            ac_with_logprobs = await policy(ob, stop_condition)
         action_count_before = len(env._all_actions)
         observation_count_before = len(env._all_observations)
         step_result = await asyncio.wait_for(
@@ -306,10 +274,9 @@ async def run_single_episode(
         "error": env._terminal_metrics.get("no_error", 1.0) == 0.0,
         "tool_types_used": list(env._tool_types_used),
         "total_curate_calls": env._total_curate_calls,
-        "policy_curate_prompts": env._terminal_curate_prompts,
-        "intent_checkpoint_prompts": env._intent_checkpoint_prompt_total,
-        "checkpoint_curate_prompts": env._checkpoint_curate_prompt_total,
-        "runtime_intent_revisions": env._intent_revision_count,
+        "audit_rejections": env.harness.audit_rejections,
+        "runtime_intent_revisions": env.harness.redirect_calls,
+        "termination_reason": env.harness.termination_reason,
         "intent_revisions": len(env.wm.intent_history),
         "current_intent": env.wm.current_intent,
         "relevance_judge_calls": env.memory_operator.relevance_judge.calls,

@@ -2,17 +2,6 @@
 
 Harness-Search organizes retrieval into a **Proposal–Commit–Audit** loop. A Retrieval Policy proposes actions, a stateful Memory Operator commits evidence, and a Summary Auditor checks whether the retained evidence supports an answer. The repository includes local hybrid retrieval, dataset preparation, index builders, and evaluation on BrowseComp+, Web, SEC, and LongSealQA.
 
-```mermaid
-flowchart LR
-    Q[Query] --> P[Retrieval Policy]
-    P -->|Propose action| M["Memory Operator<br/>Annotate · Update Direction · Commit state"]
-    M <-->|Search and read| D[Corpus / Hybrid retrieval]
-    M -->|Detached memory view| P
-    M -->|Curated evidence at termination| A[Summary Auditor]
-    A -->|More evidence needed| P
-    A -->|Answer ready| R[Result]
-```
-
 ## 1. Install the environment
 
 ```bash

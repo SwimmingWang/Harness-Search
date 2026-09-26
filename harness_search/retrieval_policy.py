@@ -161,9 +161,9 @@ class VllmRetrievalPolicy(RetrievalPolicy):
                 if tool_name == "redirect" else "CURATION CANDIDATES"
             )
             prompt += f"\n\n{heading}:\n" + "\n".join(doc_lines)
-        if tool_name == "curate" and env.summary_auditor.latest:
+        if env.wm.audit_feedback:
             prompt += "\n\nSUMMARY AUDITOR FEEDBACK:\n" + json.dumps(
-                env.summary_auditor.latest, ensure_ascii=False
+                env.wm.audit_feedback, ensure_ascii=False
             )[:2500]
         prompt += f"\n\nREQUIRED POLICY ACTION:\n{instruction}"
         return prompt, eligible
@@ -710,7 +710,7 @@ class ChatRetrievalPolicy(RetrievalPolicy):
 
     def _context(self, env: HarnessSearchEnv, required_tool: str | None = None) -> List[Dict]:
         schemas = []
-        for name, tool in env._build_full_toolset().tools.items():
+        for name, tool in env.policy_toolset().tools.items():
             if isinstance(tool, UserTextTool):
                 continue
             schema = tool.tool_schema
@@ -731,7 +731,7 @@ class ChatRetrievalPolicy(RetrievalPolicy):
         )
         if required_tool:
             instruction += f" You must choose {required_tool}."
-        elif env._retrieval_required:
+        elif env.harness.retrieval_required:
             instruction += (
                 " The environment is at a mandatory retrieval stage. You must choose "
                 "search, grep_corpus, fan_out_search, or read now; do not "
@@ -742,6 +742,8 @@ class ChatRetrievalPolicy(RetrievalPolicy):
             "working_memory": env.wm.to_text(),
             "recent_observations": recent,
             "available_tools": schemas,
+            "action_constraint": env.harness.action_hint(),
+            "summary_auditor_feedback": env.wm.audit_feedback,
         }
         if required_tool == "curate":
             uncurated_ids = [
@@ -854,12 +856,12 @@ class ChatRetrievalPolicy(RetrievalPolicy):
                 if re.sub(r"_\d+$", "", key) == tool_name and isinstance(value, dict):
                     arguments = value
                     break
-        if tool_name not in known_tools:
+        if tool_name not in known_tools and "search" in env.harness.allowed_tools:
             tool_name = "search"
             try:
                 intent = json.loads(env.wm.current_intent)
                 directions = intent.get("searchable_directions", [])
-                index = min(env._searches_since_intent_or_curate, max(len(directions) - 1, 0))
+                index = min(env.harness.searches_since_curate, max(len(directions) - 1, 0))
                 fallback_query = str(directions[index]) if directions else env.wm.query
             except Exception:
                 fallback_query = env.wm.query

@@ -47,7 +47,6 @@ from harness_search.tools import (
     SEARCH_SCHEMA,
     GREP_CORPUS_SCHEMA,
     READ_SCHEMA,
-    MULTI_TOOL_USE_SCHEMA,
 )
 from harness_search.trajectory import Action, Observation
 
@@ -64,7 +63,7 @@ DOC_SNIPPET_CHARS = int(os.environ.get("DOC_SNIPPET_CHARS", "120"))
 CURATED_DOC_CHARS = int(os.environ.get("CURATED_DOC_CHARS", "0"))
 MAX_REVIEW_DOCS = 5
 SEARCH_DISPLAY_LIMIT = int(os.environ.get("SEARCH_DISPLAY_LIMIT", "10"))
-MAX_TURNS = int(os.environ.get("MAX_TURNS", "35"))
+MAX_TURNS = int(os.environ.get("MAX_TURNS", "40"))
 
 MAX_OBS_CHARS = int(os.environ.get("MAX_OBS_CHARS", "15000"))
 SEARCH_TOKEN_BUDGET = int(os.environ.get("SEARCH_TOKEN_BUDGET", "4096"))
@@ -207,8 +206,8 @@ _CURATE_PARAMS_WITH_IMPORTANCE: Dict[str, Any] = {
         "description": (
             "Optional per-doc importance tag: {doc_id: one of 'very_high'|'high'|'fair'|'low'}. "
             "'very_high' = confirmed to directly satisfy all query constraints; 'high' = "
-            "strongly relevant; 'fair' = default if omitted; 'low' = marginal (eviction-first). "
-            "When the set is full, lowest-importance docs are evicted first."
+            "strongly relevant; 'fair' = default if omitted; 'low' = marginal. "
+            "When full, propose explicit removals; capacity overflow rejects the update."
         ),
         "additionalProperties": {"type": "string"},
     },
@@ -220,9 +219,9 @@ _curate_desc_base = (
 )
 _curate_desc_v8d = (
     f"Update your curated set of relevant documents (max {MAX_CURATED_DOCS}). The curated "
-    "set is your final output. Under v8d subtractive curation, you SHOULD tag each added "
-    "doc with an importance level; when the set is full, the lowest-importance docs are "
-    "evicted first. Default tag is 'fair'. Use 'very_high' only for docs you have "
+    "set is your final output. You may tag each added doc with an importance level. "
+    "Propose removals explicitly when at capacity. Default tag is 'fair'. "
+    "Use 'very_high' only for docs you have "
     "verified directly answer the query."
 )
 
@@ -297,23 +296,22 @@ REVIEW_DOCS_SCHEMA = ToolSchema(
 
 ALL_TOOL_SCHEMAS = [
     SEARCH_SCHEMA, GREP_CORPUS_SCHEMA, READ_SCHEMA,
-    MULTI_TOOL_USE_SCHEMA,
     FAN_OUT_SEARCH_SCHEMA, CURATE_SCHEMA, END_SCHEMA,
     REVIEW_DOCS_SCHEMA,
 ]
-if V8D_REDIRECT_TOOL:
-    ALL_TOOL_SCHEMAS.append(REDIRECT_SCHEMA)
+ALL_TOOL_SCHEMAS.append(REDIRECT_SCHEMA)
 
 
-def get_tool_descriptions() -> List[ToolDescription]:
-    """Build Harmony ToolDescription list for all 7 agent tools (+multi_tool_use)."""
+def get_tool_descriptions(allowed_tools: Optional[Set[str]] = None) -> List[ToolDescription]:
+    """Expose only the currently admissible concrete operations."""
     def _fmt(schema: ToolSchema) -> Dict[str, Any]:
         return {
             "type": "object",
             "properties": schema.parameters,
             "required": schema.required,
         }
-    return [ToolDescription.new(s.name, s.description, _fmt(s)) for s in ALL_TOOL_SCHEMAS]
+    return [ToolDescription.new(s.name, s.description, _fmt(s)) for s in ALL_TOOL_SCHEMAS
+            if allowed_tools is None or s.name in allowed_tools]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -330,17 +328,9 @@ def _v8d_prompt_addendum() -> str:
             "  - very_high: the document directly answers the query and satisfies its constraints.\n"
             "  - high: strongly relevant, hits most query constraints.\n"
             "  - fair: plausible but not confirmed (default tag if omitted).\n"
-            "  - low: marginal; will be evicted first when the set is full.\n"
+            "  - low: marginal evidence to consider removing explicitly.\n"
             "The curated set is capped at "
-            f"{MAX_CURATED_DOCS} — when full, the lowest-importance docs are "
-            "evicted first to make room for higher-tagged ones."
-        )
-    if V8D_AUTO_POPULATE_FIRST_SEARCH:
-        blocks.append(
-            "**Auto-populate (v8d):** After your first successful search, the top-ranked "
-            f"{AUTO_POPULATE_TOP_K} docs are AUTOMATICALLY added to your curated set at "
-            "`fair` importance. Your job is NOT to re-add them — instead, promote the good "
-            "ones to `high`/`very_high` and REMOVE the bad ones. This is subtractive curation."
+            f"{MAX_CURATED_DOCS}; propose explicit removals before exceeding capacity."
         )
     if V8D_EVIDENCE_GRAPH:
         blocks.append(
@@ -360,16 +350,14 @@ def _v8d_prompt_addendum() -> str:
     return "\n\n".join(blocks) + "\n"
 
 
-def get_system_prompt(query: str) -> str:
+def get_system_prompt(query: str, max_turns: int = MAX_TURNS) -> str:
     v8d_addendum = _v8d_prompt_addendum()
-    v8d_tool_line = ""
     intent_tool_line = (
         "- **redirect**(doc_ids, reasoning): Ask the Memory Operator Direction Planner to update "
         "the intent before changing search direction. Select at most 5 documents found "
-        "since the last intent update. After revision, your next action must be retrieval.\n" if V8D_REDIRECT_TOOL else ""
+        "since the last intent update. After revision, your next action must be retrieval.\n"
     )
-    intent_loop_line = ""
-    return f"""You are a retrieval subagent. Find and retrieve the most relevant documents from a corpus to help answer a question. You do NOT answer questions yourself — you only find relevant documents.
+    return f"""You are the Retrieval Policy. Propose exactly one available operation to gather evidence, curate documents, redirect the search, or request termination. The Memory Operator commits validated state and the Summary Auditor decides evidence sufficiency. Do not answer the query yourself.
 
 <query>
 {query}
@@ -382,7 +370,7 @@ def get_system_prompt(query: str) -> str:
 - **read**(doc_id): Read a document's full content. Use liberally — seeing full text reveals connections that snippets miss.
 - **review_docs**(doc_ids): Re-read previously-found documents from memory (free, no corpus call).
 - **curate**(add_ids, remove_ids{', importance' if V8D_IMPORTANCE_TAGGING else ''}): Update your curated set (max {MAX_CURATED_DOCS} docs). These are your final output.
-{intent_tool_line}{v8d_tool_line}- **end**(reasoning): Submit your curated set and conclude.
+{intent_tool_line}- **end**(reasoning): Propose termination for the Summary Auditor to accept or reject.
 
 **Context:**
 Your context has two parts:
@@ -397,17 +385,16 @@ Your context has two parts:
 **Step 1 — Decompose the Query:**
 Before your first search, identify the key constraints in the query (entities, dates, relationships, distinctive facts). Use the most specific/unique constraint for your first search.
 
-**Step 2 — Core Loop:**
-1. **Intent** — begin from the externally generated active intent.
-2. **Retrieve** — use fan_out_search, search, grep_corpus, or read.
-3. **Curate** — immediately curate the evidence returned by that retrieval stage.
-4. **Revise intent** — update the active direction using the curated retrieval evidence.
-   yielding_unverified and low_yield report novelty only; stalled reports no new documents.
-   The periodic intent revision decides whether to continue, pause, or drop each direction.
-{intent_loop_line}5. **Repeat** — after intent revision, start the next retrieval stage.
-6. **End** — call end only at a clean cycle boundary when coverage is sufficient.
+**Step 2 — Propose-Commit-Audit Loop:**
+1. Propose exactly one search, read, redirect, curate, or end operation.
+2. Memory Operator validates and commits observations, direction updates and curation.
+3. Follow the allowed next tools in the current harness state. Once the search budget
+   between curation steps is reached, only curate is allowed.
+4. After curate, choose redirect OR end. After redirect, retrieve evidence.
+5. End requests an independent Summary Auditor check of the curated evidence.
+   If rejected, your next action must be redirect to address the recorded evidence gap.
 
-You have up to **{MAX_TURNS} turns**. Use them — thorough coverage matters more than speed. Don't end early if there are unexplored angles.
+You have up to **{max_turns} turns**. Use them — thorough coverage matters more than speed. Don't end early if there are unexplored angles.
 
 The intent-state ledger is the durable search plan. Do not keep pursuing a stalled direction
 only because it was your first hypothesis, and do not treat productive retrieval as proof.
@@ -654,7 +641,10 @@ class WorkingMemory:
     via review_docs() at zero corpus cost.
     """
 
-    def __init__(self, query: str, normalize_ids: bool = True):
+    def __init__(self, query: str, normalize_ids: bool = True, evidence_capacity: int = MAX_CURATED_DOCS):
+        self.evidence_capacity = evidence_capacity
+        self.audit_feedback: Dict[str, Any] = {}
+        self.audit_history: List[Dict[str, Any]] = []
         self.query = query
         self.turn_number = 0
         self.curated_ids: List[str] = []
@@ -690,13 +680,15 @@ class WorkingMemory:
             return chunk_id
         if chunk_id in self.pool_id_set:
             return chunk_id
-        return chunk_id.rsplit("_", 1)[0]
+        base, suffix = chunk_id.rsplit("_", 1)
+        return base if suffix.isdigit() else chunk_id
 
     def get_pool_size(self) -> int:
         return len(self.pool_ids)
 
     def add_to_pool(self, chunk_ids: List[str],
-                    doc_texts: Optional[Dict[str, str]] = None) -> int:
+                    doc_texts: Optional[Dict[str, str]] = None,
+                    refresh_text: bool = False) -> int:
         """Add docs to pool and doc_store. Returns count of *newly added* docs.
 
         v8d: consults ContentDedupTracker before adding (content-level near-dup
@@ -728,7 +720,7 @@ class WorkingMemory:
                 self.pool_ids.append(doc_id)
                 self.pool_id_set.add(doc_id)
                 added += 1
-            if text and doc_id not in self.doc_store:
+            if text and (refresh_text or len(text) > len(self.doc_store.get(doc_id, {}).get("full_text", ""))):
                 self.doc_store[doc_id] = {
                     "full_text": text,
                     "snippet": text[:DOC_SNIPPET_CHARS].replace("\n", " ").strip(),
@@ -757,129 +749,43 @@ class WorkingMemory:
         notes: Optional[Dict[str, str]] = None,
         importance: Optional[Dict[str, str]] = None,
     ) -> str:
-        """Update the curated set. Returns a status string with capacity feedback.
+        """Validate an entire curation proposal before committing C_t atomically.
 
-        v8d subtractive behavior (enabled via V8D_SUBTRACTIVE_CURATION):
-        - Each added doc gets an importance tag ('very_high'|'high'|'fair'|'low');
-          missing tags default to 'fair'.
-        - When the set is full and we try to add a doc that outranks an existing
-          low-importance one, we evict the lowest-importance doc first.
-        - When removing a doc, its importance entry is also cleared.
+        No implicit selection or eviction: additions/removals are policy-owned.
+        Invalid IDs, duplicate operations and capacity overflow leave C_t intact.
         """
-        # ── Remove phase ───────────────────────────────────────────────────
-        remove_set = set(str(x) for x in remove_ids if x)
-        # Normalize remove_ids too so the model can pass either chunk or doc ids.
-        # Only explicitly low-confidence evidence may be removed; higher-confidence
-        # documents are protected from destructive mass-delete curate calls.
-        remove_set_norm = {self._normalize_id(x) for x in remove_set}
-        requested_removals = remove_set | remove_set_norm
-        remove_set_all = {
-            doc_id for doc_id in requested_removals
-            if doc_id in self.curated_ids
-            and self.curated_importance.get(doc_id, "fair") == "low"
-        }
-        self.curated_ids = [x for x in self.curated_ids if x not in remove_set_all]
-        for rid in remove_set_all:
-            self.curated_notes.pop(rid, None)
-            self.curated_importance.pop(rid, None)
+        def normalize(values, label):
+            if not isinstance(values, list) or any(not isinstance(x, str) or not x.strip() for x in values):
+                raise ValueError(f"{label} must be a list of non-empty document IDs")
+            ids = [self._normalize_id(x.strip()) for x in values]
+            if len(ids) != len(set(ids)):
+                raise ValueError(f"Duplicate IDs in {label}")
+            return ids
 
-        # Normalize importance dict keys so model can pass chunk_ids too
-        imp_norm: Dict[str, str] = {}
+        additions = normalize(add_ids, "add_ids")
+        removals = normalize(remove_ids, "remove_ids")
+        if set(additions) & set(removals):
+            raise ValueError("An ID cannot be added and removed in one proposal")
+        unknown = set(additions) - self.pool_id_set
+        invalid_removals = set(removals) - set(self.curated_ids)
+        if unknown or invalid_removals:
+            raise ValueError("Unknown additions or non-curated removals: " +
+                             ", ".join(sorted(unknown | invalid_removals)))
+        retained = [x for x in self.curated_ids if x not in set(removals)]
+        updated = retained + [x for x in additions if x not in retained]
+        if len(updated) > self.evidence_capacity:
+            raise ValueError(f"Evidence capacity exceeded: {len(updated)}/{self.evidence_capacity}")
+        tags = dict(self.curated_importance)
         if importance and V8D_IMPORTANCE_TAGGING:
-            for k, v in importance.items():
-                if not isinstance(k, str) or not isinstance(v, str):
-                    continue
-                v = v.strip().lower()
-                if v not in VALID_IMPORTANCE:
-                    v = "fair"
-                imp_norm[self._normalize_id(k.strip())] = v
-
-        # ── Add phase ──────────────────────────────────────────────────────
-        existing = set(self.curated_ids)
-        dropped: List[str] = []
-        rejected: List[str] = []
-        evicted: List[str] = []
-
-        for doc_id in add_ids:
-            doc_id = str(doc_id).strip()
-            doc_id = self._normalize_id(doc_id)
-            if doc_id not in self.pool_id_set:
-                if doc_id:
-                    rejected.append(doc_id)
-                continue
-            if not doc_id or doc_id in existing:
-                # Allow importance re-tagging of an already-curated doc
-                if doc_id in existing and doc_id in imp_norm:
-                    self.curated_importance[doc_id] = imp_norm[doc_id]
-                continue
-
-            incoming_tag = imp_norm.get(doc_id, "fair")
-
-            if len(self.curated_ids) < MAX_CURATED_DOCS:
-                self.curated_ids.append(doc_id)
-                existing.add(doc_id)
-                if V8D_IMPORTANCE_TAGGING:
-                    self.curated_importance[doc_id] = incoming_tag
-                if notes and doc_id in notes:
-                    self.curated_notes[doc_id] = notes[doc_id]
-                continue
-
-            # At capacity: try to evict a lower-importance doc if enabled
-            if V8D_SUBTRACTIVE_CURATION:
-                incoming_rank = _IMPORTANCE_RANK.get(incoming_tag, 2)
-                # find lowest-importance doc in current curated set
-                worst_id = None
-                worst_rank = -1
-                for cid in self.curated_ids:
-                    tag = self.curated_importance.get(cid, "fair")
-                    rank = _IMPORTANCE_RANK.get(tag, 2)
-                    if rank > worst_rank:
-                        worst_rank = rank
-                        worst_id = cid
-                if worst_id is not None and worst_rank > incoming_rank:
-                    # evict
-                    self.curated_ids = [c for c in self.curated_ids if c != worst_id]
-                    self.curated_importance.pop(worst_id, None)
-                    self.curated_notes.pop(worst_id, None)
-                    existing.discard(worst_id)
-                    evicted.append(worst_id)
-                    # now add
-                    self.curated_ids.append(doc_id)
-                    existing.add(doc_id)
-                    self.curated_importance[doc_id] = incoming_tag
-                    continue
-
-            dropped.append(doc_id)
-
-        n = len(self.curated_ids)
-        if V8D_IMPORTANCE_TAGGING and self.curated_importance:
-            # Render curated list sorted by importance for visibility
-            def _srt(i):
-                return (_IMPORTANCE_RANK.get(self.curated_importance.get(i, "fair"), 2), i)
-            rendered = [
-                f"{i}[{self.curated_importance.get(i, 'fair')}]"
-                for i in sorted(self.curated_ids, key=_srt)
-            ]
-        else:
-            rendered = self.curated_ids
-        ids_str = ", ".join(rendered) if rendered else "(empty)"
-        result = f"Curated set updated ({n}/{MAX_CURATED_DOCS}): {ids_str}"
-        if rejected:
-            result += (
-                f"\n[REJECTED unknown/non-pool IDs] {len(rejected)} doc(s): "
-                f"{', '.join(rejected[:5])}"
-            )
-        if evicted:
-            result += (
-                f"\n[EVICTED low-importance] {len(evicted)} doc(s): "
-                f"{', '.join(evicted[:5])}"
-            )
-        if dropped:
-            result += (
-                f"\n[CAPACITY] Set is FULL and no evictable lower-importance docs — "
-                f"{len(dropped)} doc(s) NOT added: {', '.join(dropped[:5])}"
-            )
-        return result
+            for raw_id, tag in importance.items():
+                doc_id = self._normalize_id(raw_id)
+                if doc_id not in updated or tag not in VALID_IMPORTANCE:
+                    raise ValueError("Importance must reference retained IDs and valid levels")
+                tags[doc_id] = tag
+        self.curated_ids = updated
+        self.curated_notes = {x: (notes or {}).get(x, self.curated_notes.get(x, "")) for x in updated}
+        self.curated_importance = {x: tags.get(x, "fair") for x in updated} if V8D_IMPORTANCE_TAGGING else {}
+        return f"Curated set updated ({len(updated)}/{self.evidence_capacity}): " + (", ".join(updated) or "(empty)")
 
     def add_search_record(self, tool_name: str, params_summary: str,
                           num_results: int, num_new: int = -1,
@@ -964,6 +870,13 @@ class WorkingMemory:
             "",
         ]
 
+        if self.audit_feedback:
+            lines.extend([
+                "Summary Auditor feedback (unresolved evidence gaps):",
+                json.dumps(self.audit_feedback, ensure_ascii=False),
+                "Address these gaps through redirect; feedback is not evidence.", "",
+            ])
+
         if self.intent_history:
             lines.extend([
                 f"Current Search Intent (revision {len(self.intent_history)}; advisory):",
@@ -986,7 +899,7 @@ class WorkingMemory:
 
         # Curated set — show full content when CURATED_DOC_CHARS > 0
         n_curated = len(self.curated_ids)
-        lines.append(f"Curated Set ({n_curated}/{MAX_CURATED_DOCS}):")
+        lines.append(f"Curated Set ({n_curated}/{self.evidence_capacity}):")
         if self.curated_ids:
             # v8d: render grouped by importance (very_high → high → fair → low)
             if V8D_IMPORTANCE_TAGGING and self.curated_importance:
@@ -1217,6 +1130,7 @@ def build_context(
     recent_actions: List[Action],
     recent_observations: List[Observation],
     result_summaries: Optional[List[str]] = None,
+    allowed_tools: Optional[Set[str]] = None,
 ) -> Conversation:
     """Build the hybrid context: [system + tools + query + WM? + recent turns + summaries].
 
@@ -1238,7 +1152,7 @@ def build_context(
     )
     messages = [Message.from_role_and_content(Role.SYSTEM, system_message)]
 
-    developer_message = DeveloperContent.new().with_function_tools(get_tool_descriptions())
+    developer_message = DeveloperContent.new().with_function_tools(get_tool_descriptions(allowed_tools))
     messages.append(Message.from_role_and_content(Role.DEVELOPER, developer_message))
 
     messages.append(Message.from_role_and_content(Role.USER, system_prompt))
@@ -1281,6 +1195,7 @@ def render_context_within_budget(
     budget: int = PROMPT_TOKEN_BUDGET,
     nudge_prompt: Optional[str] = None,
     retry_prompt: Optional[str] = None,
+    allowed_tools: Optional[Set[str]] = None,
 ) -> List[int]:
     """Render context tokens guaranteed to be within token budget.
 
@@ -1305,7 +1220,7 @@ def render_context_within_budget(
     # --- Pass 1: normal render ---
     conv = build_context(
         system_prompt, wm_text, recent_actions, recent_observations,
-        result_summaries,
+        result_summaries, allowed_tools=allowed_tools,
     )
     conv = _append_tail(conv)
     tokens = enc.render_conversation(conv)
@@ -1333,7 +1248,7 @@ def render_context_within_budget(
 
         conv = build_context(
             system_prompt, truncated_wm, recent_actions, recent_observations,
-            result_summaries,
+            result_summaries, allowed_tools=allowed_tools,
         )
         conv = _append_tail(conv)
         tokens = enc.render_conversation(conv)
@@ -1354,7 +1269,7 @@ def render_context_within_budget(
 
     conv = build_context(
         system_prompt, aggressive_wm, compressed_actions, recent_observations,
-        result_summaries,
+        result_summaries, allowed_tools=allowed_tools,
     )
     conv = _append_tail(conv)
     tokens = enc.render_conversation(conv)
@@ -1374,7 +1289,7 @@ def render_context_within_budget(
 
         conv = build_context(
             system_prompt, aggressive_wm, drop_actions, drop_obs,
-            drop_summaries or None,
+            drop_summaries or None, allowed_tools=allowed_tools,
         )
         conv = _append_tail(conv)
         tokens = enc.render_conversation(conv)
@@ -1382,7 +1297,9 @@ def render_context_within_budget(
             return tokens
 
     # --- Pass 5: minimal context (system + query only) ---
-    conv = build_context(system_prompt, None, [], [], None)
+    conv = build_context(system_prompt, None, [], [], None, allowed_tools=allowed_tools)
+    if nudge_prompt:
+        conv = Conversation(messages=list(conv.messages) + [Message.from_role_and_content(Role.USER, nudge_prompt)])
     if retry_prompt:
         msgs = list(conv.messages)
         msgs.append(Message.from_role_and_content(Role.USER, retry_prompt))

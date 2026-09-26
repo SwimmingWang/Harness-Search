@@ -30,7 +30,7 @@ SUMMARY_AUDITOR_FALLBACK_NAME = os.environ.get(
 )
 V3_JUDGES_ENABLED = os.environ.get("V3_JUDGES_ENABLED", "1") == "1"
 SUMMARY_MIN_RETRIEVAL_CALLS = int(
-    os.environ.get("SUMMARY_MIN_RETRIEVAL_CALLS", "5")
+    os.environ.get("SUMMARY_MIN_RETRIEVAL_CALLS", "0")
 )
 INTENT_MODEL_TIMEOUT = float(os.environ.get("INTENT_MODEL_TIMEOUT", "120"))
 INTENT_MODEL_MAX_TOKENS = int(os.environ.get("INTENT_MODEL_MAX_TOKENS", "2600"))

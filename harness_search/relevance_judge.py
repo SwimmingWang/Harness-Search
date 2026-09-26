@@ -47,7 +47,7 @@ class RelevanceJudge:
                     if not isinstance(item, dict):
                         continue
                     doc_id = str(item.get("doc_id", ""))
-                    if doc_id not in batch_ids or not item.get("relevant"):
+                    if doc_id not in batch_ids or item.get("relevant") is not True:
                         continue
                     intent = str(item.get("intent", "")).strip()
                     if intent:

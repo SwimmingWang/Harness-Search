@@ -43,6 +43,8 @@ Operation: update_direction
 - Distinguish attempted directions without useful feedback from directions
   supported by retrieved evidence. Retrieval yield alone is not proof of support.
 - Search suggestions are advisory and must not be executed.
+- If summary_auditor_feedback identifies missing support or a broken evidence
+  connection, target that gap in the updated direction; feedback is not evidence.
 - At initialization, selected_documents is empty. Do not invent prior searches,
   evidence, or completed directions.
 - Return exactly these fields:

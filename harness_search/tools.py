@@ -817,8 +817,10 @@ class ReadTool(Tool):
         )  # Models seem to get confused between doc_id and id, so we support both
         log.info("read", doc_id=doc_id)
         # Model may call with <docid> or <docid>_<chunk_id>, so we need to handle both
-        if "_" in doc_id:
-            doc_id = doc_id.split("_")[0]
+        if "_" in doc_id and not (overrides or {}).get("doc_id_is_normalized"):
+            base, suffix = doc_id.rsplit("_", 1)
+            if suffix.isdigit():
+                doc_id = base
         local_hybrid = _get_local_hybrid()
         if local_hybrid is not None:
             ids, documents = local_hybrid.read_source(doc_id)
@@ -839,7 +841,7 @@ class ReadTool(Tool):
         # Sort by chunk_id first to get document order
         zipped = list(zip(ids, documents))
         sorted_zipped = sorted(
-            zipped, key=lambda x: int(x[0].split("_")[1]) if "_" in x[0] else 0
+            zipped, key=lambda x: int(x[0].rsplit("_", 1)[1]) if "_" in x[0] and x[0].rsplit("_", 1)[1].isdigit() else 0
         )
         ids = [x[0] for x in sorted_zipped]
         documents = [x[1] for x in sorted_zipped]

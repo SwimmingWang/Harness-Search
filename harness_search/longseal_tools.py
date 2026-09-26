@@ -62,7 +62,7 @@ class LongSealReadTool(Tool):
         doc_id = str(params.get("doc_id", params.get("id", "")))
         doc = self._by_id.get(doc_id)
         if doc is None:
-            return "Document not found", None
+            raise ValueError(f"Document not found: {doc_id}")
         return f"# {doc.get('title', '')}\n{doc.get('text', '')}", None
 
 

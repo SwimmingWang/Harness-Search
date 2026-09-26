@@ -13,30 +13,33 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import structlog
 from harness_search.model_settings import (
-    ABLATE_REVIEW_DOCS_UNAVAILABLE, INTENT_MODEL_API_KEY, INTENT_MODEL_BASE_URL,
-    INTENT_MODEL_HEADER_API_KEY, INTENT_MODEL_TIMEOUT, INTENT_MODEL_MAX_TOKENS,
-    INTENT_MODEL_RETRY_MAX_TOKENS, INTENT_MODEL_NAME, RELEVANCE_JUDGE_MODEL_NAME,
-    V3_JUDGES_ENABLED,
+    ABLATE_REVIEW_DOCS_UNAVAILABLE, V3_JUDGES_ENABLED,
 )
 from harness_search.tools import (
     ToolCallMetadata, SearchToolCallMetadata, GrepCorpusToolCallMetadata,
 )
 from harness_search.ultra_core import (
     WorkingMemory, parse_doc_texts_from_observation, append_token_marker,
-    compress_search_observation, auto_populate_from_first_search,
-    AUTO_POPULATE_TOP_K, FAN_OUT_MAX_QUERIES, MAX_REVIEW_DOCS,
-    V8D_AUTO_POPULATE_FIRST_SEARCH, V8D_IMPORTANCE_TAGGING,
+    compress_search_observation,
+    FAN_OUT_MAX_QUERIES, MAX_REVIEW_DOCS,
+    V8D_IMPORTANCE_TAGGING,
     V8D_SENTENCE_COMPRESS, V8D_TOKEN_BUDGET_MARKER,
     V8D_INTENT_STATE_TRACKING, V8D_ADAPTIVE_RERANK_INSTRUCTION,
 )
 from harness_search.relevance_judge import RelevanceJudge
-from harness_search.memory_prompts import MEMORY_OPERATOR_SYSTEM_PROMPT
+from harness_search.direction_planner import DirectionPlanner
+from harness_search.contracts import ActionProposal, CommitResult, EvidenceDocument, EvidenceSnapshot
+from harness_search.actions import canonical_tool_name
 
 logger = structlog.get_logger(__name__)
 
 class FanOutSearchToolCallMetadata(ToolCallMetadata):
     returned_chunk_ids: List[str]
     queries_executed: int
+
+
+class RetrievalReadMetadata(ToolCallMetadata):
+    returned_chunk_ids: List[str]
 
 
 class MemoryView:
@@ -47,6 +50,7 @@ class MemoryView:
         "pool_id_set", "search_history", "intent_direction_states",
         "current_intent", "intent_history", "doc_store", "normalize_ids",
         "curated_importance", "rerank_instruction", "auto_populated", "dup_skipped",
+        "audit_feedback", "audit_history", "evidence_capacity",
     })
 
     def __init__(self, memory):
@@ -77,7 +81,8 @@ class MemoryOperator:
     """A stateful memory agent with explicit commit operations and read-only views."""
 
     def __init__(self, *, query_id, query_text, toolset, search_tool,
-                 normalize_ids=True, text_token_counter=None, relevance_judge=None):
+                 normalize_ids=True, text_token_counter=None, relevance_judge=None,
+                 direction_planner=None):
         self.query_id = query_id
         self.toolset = toolset
         self.search_tool = search_tool
@@ -85,15 +90,11 @@ class MemoryOperator:
         self._wm = WorkingMemory(query_text, normalize_ids=normalize_ids)
         self.view = MemoryView(self)
         self.relevance_judge = relevance_judge or RelevanceJudge(query_id)
+        self.direction_planner = direction_planner or DirectionPlanner(query_id)
         self._ids_seen: Set[str] = set()
         self._doc_id_to_query: Dict[str, str] = {}
         self._docs_since_intent: Set[str] = set()
-        self._last_intent_doc_ids: List[str] = []
-        self._intent_selected_doc_ids: List[str] = []
-        self._intent_meta_query_backlog: List[str] = []
-        self._intent_pending_recommendations: Dict[str, float] = {}
         self._relevance_annotations: Dict[str, str] = {}
-        self._first_search_done = False
         self._approx_prompt_tokens = 0
 
     @property
@@ -105,22 +106,83 @@ class MemoryOperator:
         return dict(self._relevance_annotations)
 
     def reset_working_memory(self):
-        self._wm = WorkingMemory(self._wm.query, normalize_ids=self._wm.normalize_ids)
+        rerank_instruction = self._wm.rerank_instruction
+        self._wm = WorkingMemory(self._wm.query, normalize_ids=self._wm.normalize_ids,
+                                 evidence_capacity=self._wm.evidence_capacity)
+        self._wm.rerank_instruction = rerank_instruction
+        self._ids_seen.clear()
+        self._doc_id_to_query.clear()
+        self._docs_since_intent.clear()
+        self._relevance_annotations.clear()
+        self._approx_prompt_tokens = 0
 
-    def configure(self, *, normalize_ids=None, rerank_instruction=None):
+    def configure(self, *, normalize_ids=None, rerank_instruction=None, evidence_capacity=None):
         if normalize_ids is not None:
             self._wm.normalize_ids = normalize_ids
         if rerank_instruction is not None:
             self._wm.rerank_instruction = rerank_instruction
+        if evidence_capacity is not None:
+            if evidence_capacity < 1 or evidence_capacity < len(self._wm.curated_ids):
+                raise ValueError("Invalid evidence capacity")
+            self._wm.evidence_capacity = evidence_capacity
+
+    def initialize_direction(self):
+        self.reset_working_memory()
+        try:
+            return CommitResult(self.redirect({
+                "doc_ids": [],
+                "reasoning": "Initialize one active direction from the query; no evidence has been retrieved.",
+            }, initial=True))
+        except Exception as exc:
+            return CommitResult(f"Initial direction unavailable; retain the original query: {exc}", False)
+
+    def execute(self, proposal: ActionProposal) -> CommitResult:
+        """Commit one policy proposal; never choose an operation or approve end."""
+        name = canonical_tool_name(proposal.name)
+        params = dict(proposal.arguments)
+        try:
+            retrieval = {"search": self.search, "fan_out_search": self.fan_out_search,
+                         "grep_corpus": self.grep, "read": self.read}
+            if name in retrieval:
+                pool_before = set(self._wm.pool_ids)
+                output, metadata = retrieval[name](params)
+                annotations = self.annotate_retrieval(pool_before, metadata)
+                return CommitResult(output + ("\n\n" + annotations if annotations else ""), metadata=metadata)
+            if name == "curate":
+                output = self.curate(params)
+                return CommitResult(output)
+            if name == "redirect":
+                output = self.redirect(params)
+                self.start_retrieval_stage()
+                return CommitResult(output)
+            if name == "review_docs":
+                return CommitResult(self.review(params))
+            raise ValueError(f"Memory Operator cannot execute {name}")
+        except Exception as exc:
+            logger.warning("memory_commit_rejected", qid=self.query_id, tool=name, error=str(exc)[:240])
+            return CommitResult(f"Rejected {name}: {exc}", False)
+
+    def evidence_snapshot(self) -> EvidenceSnapshot:
+        return EvidenceSnapshot(
+            query=self._wm.query, current_intent=self._wm.current_intent,
+            documents=tuple(EvidenceDocument(
+                doc_id=doc_id, intent=self._wm.curated_notes.get(doc_id, ""),
+                text=(self._wm.doc_store.get(doc_id, {}).get("full_text")
+                      or self._wm.doc_store.get(doc_id, {}).get("snippet") or "")[:900],
+            ) for doc_id in self._wm.curated_ids),
+        )
+
+    def commit_audit(self, result):
+        """Record the diagnosis without treating its proposed target as evidence."""
+        feedback = copy.deepcopy(result)
+        self._wm.audit_history.append({"turn": self._wm.turn_number, **feedback})
+        self._wm.audit_feedback = feedback if feedback.get("verdict") != "answer_ready" else {}
 
     def set_prompt_tokens(self, count):
         self._approx_prompt_tokens = count
 
     def advance_turn(self):
         self._wm.advance_turn()
-
-    def complete_curation(self):
-        self._intent_pending_recommendations.clear()
 
     def start_retrieval_stage(self):
         self._docs_since_intent.clear()
@@ -133,10 +195,16 @@ class MemoryOperator:
             doc_id = self._wm._normalize_id(str(raw_id))
             if doc_id in self._wm.pool_ids:
                 self._docs_since_intent.add(doc_id)
-        if not V3_JUDGES_ENABLED or not new_ids:
+        # Re-read documents can contain new supporting text, even if their IDs
+        # were already present in P_t. Annotate those returned IDs as well.
+        annotation_ids = list(dict.fromkeys(new_ids + [
+            self._wm._normalize_id(str(raw_id)) for raw_id in returned
+            if self._wm._normalize_id(str(raw_id)) in self._wm.pool_id_set
+        ]))
+        if not V3_JUDGES_ENABLED or not annotation_ids:
             return ""
         documents = []
-        for doc_id in dict.fromkeys(new_ids):
+        for doc_id in annotation_ids:
             store = self._wm.doc_store.get(doc_id, {})
             text = store.get("full_text") or store.get("snippet") or ""
             documents.append({"doc_id": doc_id, "text": text[:3000]})
@@ -152,30 +220,12 @@ class MemoryOperator:
         query_for_compress: str,
         first_search_ranked_ids: Optional[List[str]] = None,
     ) -> str:
-        """v8d wrapper: BM25 compress + auto-populate + token marker."""
+        """Compress observations and attach an optional token marker."""
         # 1. Sentence-level compression (no-op unless flag on)
         if V8D_SENTENCE_COMPRESS and query_for_compress:
             output = compress_search_observation(query_for_compress, output)
 
-        # 2. Auto-populate the curated set from the first search's top hits
-        if (
-            V8D_AUTO_POPULATE_FIRST_SEARCH
-            and not self._first_search_done
-            and first_search_ranked_ids
-        ):
-            added = auto_populate_from_first_search(
-                self._wm, first_search_ranked_ids, top_k=AUTO_POPULATE_TOP_K,
-            )
-            self._first_search_done = True
-            if added > 0:
-                output = (
-                    output
-                    + f"\n\n[AUTO-POPULATED] Top {added} docs from this search have been "
-                    "added to your curated set at 'fair' importance. Use `curate` with "
-                    "`importance` to promote/demote and `remove_ids` to drop irrelevant ones."
-                )
-
-        # 3. Token budget marker (no-op unless flag on)
+        # 2. Token budget marker (no-op unless flag on)
         if V8D_TOKEN_BUDGET_MARKER and self.text_token_counter is not None:
             try:
                 used = self._approx_prompt_tokens + self.text_token_counter(output)
@@ -202,7 +252,7 @@ class MemoryOperator:
             doc_texts = parse_doc_texts_from_observation(output)
             self._wm.add_to_pool(meta.returned_chunk_ids, doc_texts)
             for cid in meta.returned_chunk_ids:
-                doc_id = cid.split("_")[0] if "_" in cid else cid
+                doc_id = self._wm._normalize_id(cid)
                 self._doc_id_to_query.setdefault(doc_id, str(query))
             num_new = self._wm.get_pool_size() - pool_before
             self._wm.add_search_record(
@@ -249,7 +299,7 @@ class MemoryOperator:
                     self._wm.add_to_pool(meta.returned_chunk_ids, doc_texts)
                     all_chunk_ids.extend(meta.returned_chunk_ids)
                     for cid in meta.returned_chunk_ids:
-                        doc_id = cid.split("_")[0] if "_" in cid else cid
+                        doc_id = self._wm._normalize_id(cid)
                         self._doc_id_to_query.setdefault(doc_id, str(q))
             except Exception as e:
                 logger.warning("fan_out_error", query=str(q)[:100], error=str(e)[:200])
@@ -283,7 +333,7 @@ class MemoryOperator:
     def grep(self, params: Dict) -> Tuple[str, Optional[ToolCallMetadata]]:
         grep_tool = self.toolset.get_tool("grep_corpus")
         if grep_tool is None:
-            return "grep_corpus not available.", None
+            raise ValueError("grep_corpus not available")
         pool_before = self._wm.get_pool_size()
         output, meta = grep_tool(params)
         direction_status = ""
@@ -312,18 +362,22 @@ class MemoryOperator:
     def read(self, params: Dict) -> Tuple[str, Optional[ToolCallMetadata]]:
         read_tool = self.toolset.get_tool("read")
         if read_tool is None:
-            return "read not available.", None
+            raise ValueError("read not available")
         doc_id = params.get("doc_id") or params.get("id", "")
-        if self._wm.normalize_ids and "_" in doc_id:
-            doc_id = doc_id.split("_")[0]
-        overrides = {}
+        doc_id = self._wm._normalize_id(str(doc_id))
+        if not doc_id or doc_id not in self._wm.pool_id_set:
+            raise ValueError("read requires a document already in the candidate pool")
+        overrides = {"doc_id_is_normalized": True}
         if doc_id in self._doc_id_to_query:
             overrides["query"] = self._doc_id_to_query[doc_id]
         pool_before = self._wm.get_pool_size()
-        output, meta = read_tool(params, overrides or None)
+        output, meta = read_tool({**params, "doc_id": doc_id}, overrides)
         doc_texts = parse_doc_texts_from_observation(output)
+        if not doc_texts and output.strip():
+            doc_texts = {doc_id: output}
         if doc_texts:
-            self._wm.add_to_pool(list(doc_texts.keys()), doc_texts)
+            meta = RetrievalReadMetadata(returned_chunk_ids=list(doc_texts))
+            self._wm.add_to_pool(list(doc_texts.keys()), doc_texts, refresh_text=True)
         num_new = self._wm.get_pool_size() - pool_before
         self._wm.add_search_record(
             "read", str(doc_id)[:30],
@@ -343,10 +397,8 @@ class MemoryOperator:
     def curate(self, params: Dict) -> str:
         add_ids = params.get("add_ids", [])
         remove_ids = params.get("remove_ids", [])
-        if not isinstance(add_ids, list):
-            add_ids = [str(add_ids)] if add_ids else []
-        if not isinstance(remove_ids, list):
-            remove_ids = [str(remove_ids)] if remove_ids else []
+        if not isinstance(add_ids, list) or not isinstance(remove_ids, list):
+            raise ValueError("add_ids and remove_ids must be lists")
 
         importance: Optional[Dict[str, str]] = None
         if V8D_IMPORTANCE_TAGGING:
@@ -357,7 +409,7 @@ class MemoryOperator:
         notes = {
             self._wm._normalize_id(str(doc_id)): self._relevance_annotations.get(
                 self._wm._normalize_id(str(doc_id)),
-                "Supports the current query intent.",
+                "Selected by the Retrieval Policy; support has not been annotated.",
             )
             for doc_id in add_ids
         }
@@ -384,10 +436,10 @@ class MemoryOperator:
         """Use the Direction Planner to revise the advisory search intent."""
         reasoning = str(params.get("reasoning", "")).strip()
         if len(reasoning) < 12:
-            return "redirect: reasoning is missing or too short."
+            raise ValueError("redirect: reasoning is missing or too short.")
         raw_doc_ids = params.get("doc_ids", [])
         if not isinstance(raw_doc_ids, list):
-            return "redirect: doc_ids must be a list."
+            raise ValueError("redirect: doc_ids must be a list.")
         doc_ids = []
         for raw_id in raw_doc_ids:
             raw_id = str(raw_id).strip()
@@ -397,15 +449,15 @@ class MemoryOperator:
             if doc_id not in doc_ids:
                 doc_ids.append(doc_id)
         if len(doc_ids) > 5:
-            return "redirect: select at most 5 document IDs."
+            raise ValueError("redirect: select at most 5 document IDs.")
         if initial and doc_ids:
-            return "redirect: initial intent must use an empty document list."
+            raise ValueError("redirect: initial intent must use an empty document list.")
         invalid_ids = [
             doc_id for doc_id in doc_ids
             if doc_id not in self._docs_since_intent or doc_id not in self._wm.pool_ids
         ]
         if not initial and invalid_ids:
-            return (
+            raise ValueError(
                 "redirect: IDs must come from documents found since the previous "
                 "intent revision. Invalid IDs: " + ", ".join(invalid_ids[:5])
             )
@@ -418,110 +470,18 @@ class MemoryOperator:
             }
             for doc_id in doc_ids
         ]
-        system = MEMORY_OPERATOR_SYSTEM_PROMPT
-        user = json.dumps({
-            "operation": "update_direction",
-            "original_query": self._wm.query,
-            "previous_intent": self._wm.current_intent,
-            "policy_reasoning": reasoning,
-            "selected_documents": selected_documents,
-            "recent_search_history": self._wm.search_history[-12:],
-            "direction_ledger": self._wm.intent_direction_states[-12:],
-            "curated_doc_ids": self._wm.curated_ids[:30],
-        }, ensure_ascii=False)
-        if not INTENT_MODEL_API_KEY:
-            logger.warning(
-                "intent_model_error",
-                error="INTENT_MODEL_API_KEY is not configured",
-                qid=self.query_id,
-            )
-            return "redirect: INTENT_MODEL_API_KEY is not configured."
-        try:
-            from openai import OpenAI
-            client = OpenAI(
-                base_url=INTENT_MODEL_BASE_URL,
-                api_key=INTENT_MODEL_API_KEY,
-                default_headers={"api-key": INTENT_MODEL_HEADER_API_KEY},
-                timeout=INTENT_MODEL_TIMEOUT,
-            )
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
-            response = client.chat.completions.create(
-                model=RELEVANCE_JUDGE_MODEL_NAME,
-                messages=messages,
-                temperature=0.2,
-                max_tokens=INTENT_MODEL_MAX_TOKENS,
-                response_format={"type": "json_object"},
-                extra_body=(
-                    {"reasoning_effort": "low"}
-                    if "gpt-oss" in RELEVANCE_JUDGE_MODEL_NAME.lower()
-                    else ({"chat_template_kwargs": {"enable_thinking": False}}
-                          if "qwen" in RELEVANCE_JUDGE_MODEL_NAME.lower() else None)
-                ),
-            )
-            revised = response.choices[0].message.content or ""
-            try:
-                revised_obj = json.loads(revised)
-            except json.JSONDecodeError as first_exc:
-                logger.warning(
-                    "intent_json_retry", qid=self.query_id,
-                    error=str(first_exc)[:200], output_chars=len(revised),
-                )
-                retry_messages = messages + [{
-                    "role": "user",
-                    "content": (
-                        "The previous response was invalid or truncated JSON. Regenerate from "
-                        "the same evidence as one compact JSON object only. Use at most 3 short "
-                        "items per direction list and short strings. Close every array, "
-                        "string, and object."
-                    ),
-                }]
-                retry_response = client.chat.completions.create(
-                    model=RELEVANCE_JUDGE_MODEL_NAME,
-                    messages=retry_messages,
-                    temperature=0.0,
-                    max_tokens=INTENT_MODEL_RETRY_MAX_TOKENS,
-                    response_format={"type": "json_object"},
-                    extra_body=(
-                        {"reasoning_effort": "low"}
-                        if "gpt-oss" in RELEVANCE_JUDGE_MODEL_NAME.lower()
-                        else ({"chat_template_kwargs": {"enable_thinking": False}}
-                              if "qwen" in RELEVANCE_JUDGE_MODEL_NAME.lower() else None)
-                    ),
-                )
-                revised = retry_response.choices[0].message.content or ""
-                revised_obj = json.loads(revised)
-            # Retain intent directions as policy-visible planning state; do not execute retrieval here.
-            meta_search_queries = revised_obj.get("searchable_directions", [])
-            if isinstance(meta_search_queries, list):
-                for backlog_query in meta_search_queries:
-                    if isinstance(backlog_query, dict):
-                        backlog_query = (backlog_query.get("query") or backlog_query.get("direction") or backlog_query.get("description") or "")
-                    backlog_query = str(backlog_query).strip()
-                    if len(backlog_query) >= 8 and backlog_query not in self._intent_meta_query_backlog:
-                        self._intent_meta_query_backlog.append(backlog_query)
-            intent_keys = (
-                "query_explanation", "active_direction", "searchable_directions",
-                "no_positive_feedback_directions", "completed_directions",
-                "change_summary",
-            )
-            revised_obj = {key: revised_obj.get(key, [] if key.endswith("directions") else "") for key in intent_keys}
-            for key in ("searchable_directions", "no_positive_feedback_directions", "completed_directions"):
-                value = revised_obj.get(key, [])
-                revised_obj[key] = value[:5] if isinstance(value, list) else []
-            self._intent_pending_recommendations = {}
-            revised = json.dumps(revised_obj, ensure_ascii=False, indent=2)
-            self._last_intent_doc_ids = list(doc_ids)
-            for selected_doc_id in doc_ids:
-                if selected_doc_id not in self._intent_selected_doc_ids:
-                    self._intent_selected_doc_ids.append(selected_doc_id)
-        except Exception as exc:
-            logger.warning("intent_model_error", error=str(exc)[:300], qid=self.query_id)
-            return (
-                "redirect: configured intent model unavailable. "
-                f"Check {INTENT_MODEL_BASE_URL} model {INTENT_MODEL_NAME} ({str(exc)[:120]})."
-            )
+        revised_obj = self.direction_planner.plan(
+            query=self._wm.query,
+            previous_intent=self._wm.current_intent,
+            reasoning=reasoning,
+            documents=selected_documents,
+            search_history=self._wm.search_history[-12:],
+            direction_ledger=self._wm.intent_direction_states[-12:],
+            curated_ids=list(self._wm.curated_ids),
+            audit_feedback=copy.deepcopy(self._wm.audit_feedback),
+        )
+        # Only the operator persists the validated plan; suggestions stay advisory.
+        if initial and (revised_obj["completed_directions"] or revised_obj["no_positive_feedback_directions"]):
+            raise ValueError("Initial direction cannot claim prior search progress")
         self._wm.add_search_record("redirect", reasoning[:60], 0, num_new=0)
-        return self._wm.redirect(reasoning, revised)
+        return self._wm.redirect(reasoning, json.dumps(revised_obj, ensure_ascii=False, indent=2))
