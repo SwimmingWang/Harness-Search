@@ -86,6 +86,7 @@ def save_full_trajectory(env: HarnessSearchEnv) -> None:
         "dataset": env.dataset.name,
         "system_prompt": env.system_prompt,
         "turns": turns,
+        "budget_turns": env.harness.turns,
         "curated_ids": env.wm.curated_ids,
         "curated_importance": dict(env.wm.curated_importance),
         "curated_intents": dict(env.wm.curated_notes),
@@ -180,7 +181,7 @@ async def run_single_episode(
     turns = 0
     start = time.time()
     env._turn_trace = []
-    # Every proposal (including rejected/malformed ones) consumes one policy turn.
+    # Format retries count as policy calls, but do not consume execution turns.
     while True:
         required_action = env.required_action or "policy_choice"
 
@@ -268,6 +269,7 @@ async def run_single_episode(
     result = {
         "reward": env._terminal_reward,
         "turns": turns,
+        "budget_turns": env.harness.turns,
         "n_curated": len(env.wm.curated_ids),
         "n_pool": len(env.wm.pool_ids),
         "elapsed_s": round(elapsed, 1),

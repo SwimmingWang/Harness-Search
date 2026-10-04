@@ -34,6 +34,23 @@ def choose_split(raw, preferred):
     raise RuntimeError(f"No non-empty split available: {list(raw)}")
 
 
+def reuse_local_split(name: str, split: str, target: Path) -> bool:
+    """Reuse valid local queries without contacting the Hub or replacing data."""
+    path = target / f"{split}.parquet"
+    if not path.exists():
+        return False
+    import pyarrow.parquet as pq
+    try:
+        table = pq.read_table(path)
+    except Exception as exc:
+        raise RuntimeError(f"Cannot read local queries: {path}. Move or repair the file before retrying.") from exc
+    missing = {"query_id", "query", "document_ids", "answer"} - set(table.column_names)
+    if missing or table.num_rows == 0:
+        raise RuntimeError(f"Invalid local queries: {path}; rows={table.num_rows}, missing columns={sorted(missing)}")
+    print(f"ready dataset={name} split={split} queries={table.num_rows} source=local path={path}")
+    return True
+
+
 def install_bundled_split(name: str, split: str, target: Path) -> bool:
     """Verify the released snapshot before copying it to the runtime data root."""
     relative = f"queries/{name}/{split}.parquet"
@@ -96,7 +113,7 @@ def main():
     parser.add_argument("--transfer-output", type=Path, default=None)
     parser.add_argument("--split", choices=("train", "test", "both"), default="test")
     parser.add_argument("--revision", default="main", help="HF query revision; select one dataset when pinning")
-    parser.add_argument("--upstream", action="store_true", help="Download Web/SEC queries from Hugging Face instead of using bundled snapshots")
+    parser.add_argument("--upstream", action="store_true", help="Download Web/SEC queries from Hugging Face instead of reusing local files or bundled snapshots")
     args = parser.parse_args()
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or None
     for name in args.datasets or ["browsecompplus", "web", "sec", "longsealqa"]:
@@ -123,6 +140,8 @@ def main():
             for split in names:
                 override = os.environ.get(f"{name.upper()}_{split.upper()}_QUERY_REPO")
                 if not args.upstream and not override and args.revision == "main":
+                    if reuse_local_split(name, split, target):
+                        continue
                     if install_bundled_split(name, split, target):
                         continue
                 repo = override or SOURCES[name][split]

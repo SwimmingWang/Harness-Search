@@ -3,7 +3,7 @@ set -euo pipefail
 MODE="${1:-all}"
 case "$MODE" in all|policy|retrieval) ;; *) echo "Usage: $0 {all|policy|retrieval}"; exit 2;; esac
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-VLLM="${VLLM_BIN:-$ROOT/.venv-serve/bin/vllm}"
+VLLM="${VLLM_BIN:-$ROOT/.venv/bin/vllm}"
 SERVICE_LOG_DIR="${SERVICE_LOG_DIR:-$ROOT/tmp/service_logs}"
 TP="${TENSOR_PARALLEL_SIZE:-8}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-1800}"
@@ -15,7 +15,7 @@ launch() {
     return
   fi
   if model_ready "$port"; then echo "$name already ready on port $port"; return; fi
-  [[ -x "$VLLM" ]] || { echo "Missing vLLM: $VLLM; install vllm==0.20.2 in .venv-serve" >&2; exit 2; }
+  [[ -x "$VLLM" ]] || { echo "Missing vLLM: $VLLM; run .venv/bin/python -m pip install -r requirements.txt" >&2; exit 2; }
   mkdir -p "$SERVICE_LOG_DIR"
   nohup env VLLM_USE_DEEP_GEMM=0 VLLM_MOE_USE_DEEP_GEMM=0 \
     "$VLLM" serve "$@" --host 127.0.0.1 --port "$port" --tensor-parallel-size "$TP" \

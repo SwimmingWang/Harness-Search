@@ -39,15 +39,16 @@ export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-120}"
 export ANONYMIZED_TELEMETRY=False POSTHOG_DISABLED=1
 
 dataset_paths() {
-  local dataset="$1" corpus_split collection
+  local dataset="$1" corpus_split collection default_index_root
+  default_index_root="$DATA_ROOT/indexes/$dataset"
   case "$dataset" in
     browsecompplus) corpus_split=test; EXPECTED_CORPUS_COUNT=1144886; collection=browsecompplus_qwen3_embedding_8b_4096_local ;;
-    web) corpus_split=test; EXPECTED_CORPUS_COUNT=54735; collection=web_test_1_17_qwen3_embedding_8b_4096_full ;;
+    web) corpus_split=test; EXPECTED_CORPUS_COUNT=54735; collection="${WEB_QDRANT_COLLECTION:-web_test_1_17_qwen3_embedding_8b_4096_full}"; default_index_root="${WEB_INDEX_ROOT:-$default_index_root}" ;;
     sec) corpus_split=train; EXPECTED_CORPUS_COUNT=2115106; collection=sec_1_4_qwen3_embedding_8b_4096_full ;;
     *) echo "No shared corpus for dataset: $dataset" >&2; return 2 ;;
   esac
   CORPUS="${CORPUS:-$DATA_ROOT/corpora/$dataset/corpora/$dataset/$corpus_split}"
-  INDEX_ROOT="${INDEX_ROOT:-$DATA_ROOT/indexes/$dataset}"
+  INDEX_ROOT="${INDEX_ROOT:-$default_index_root}"
   BM25_DIR="${DATASET_BM25_DIR:-$INDEX_ROOT/bm25}"
   COLLECTION="${DATASET_QDRANT_COLLECTION:-$collection}"
   if [[ "$dataset" == browsecompplus ]]; then

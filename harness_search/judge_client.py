@@ -54,7 +54,7 @@ class JudgeClient:
                 content = message.content or ""
                 if not content:
                     logger.warning(
-                        "v3_judge_reasoning_fallback",
+                        "judge_reasoning_fallback",
                         qid=self.query_id,
                         model=candidate,
                         reasoning=str(getattr(message, "reasoning", ""))[:2000],
@@ -89,7 +89,7 @@ class JudgeClient:
             except Exception as exc:
                 last_error = exc
                 logger.warning(
-                    "v3_judge_model_retry", qid=self.query_id,
+                    "judge_model_retry", qid=self.query_id,
                     model=candidate, error=str(exc)[:200],
                 )
         raise RuntimeError(f"all judge models failed: {last_error}")

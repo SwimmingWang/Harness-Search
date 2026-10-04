@@ -6,7 +6,7 @@ Harness-Search organizes retrieval into a **Proposal–Commit–Audit** loop. A 
 
 ```bash
 cd Harness-Search
-python3.11 -m venv .venv
+.venv-serve/bin/python -m pip install -r requirements-serve.txt
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
@@ -26,15 +26,19 @@ The example configuration uses one Qwen3.5-27B chat endpoint for the Retrieval P
 
 ## 3. Prepare datasets
 
-Web and SEC query snapshots are included under [`datasets/`](datasets/),
-with questions, answers, and evidence labels. Their full retrieval corpora are
-downloaded separately. Prepare both datasets with:
+We use datasets from Huggingface. Login first:
+```
+hf auth login
+```
+Web and SEC query snapshots are included under [`data/`](data/), with questions, answers, and evidence labels. Their full retrieval corpora are downloaded separately. Prepare both datasets with:
 
 ```bash
 bash scripts/download_data.sh web sec
 ```
 
-BrowseComp+ and LongSealQA data are not included in Git. Download and prepare them from their upstream releases:
+Existing non-empty `data/queries/{web,sec}/test.parquet` files with the required query columns are reused without contacting Hugging Face for queries. Missing queries fall back to bundled snapshots, then Hugging Face. Invalid local files produce an error without overwriting them. Retrieval corpora are still downloaded separately. Explicit query `--upstream`, repository overrides, or pinned revisions bypass local reuse.
+
+Download and prepare BrowseComp+ and LongSealQA data from their upstream releases:
 
 ```bash
 bash scripts/download_data.sh browsecompplus
@@ -54,13 +58,6 @@ data/
 ```
 ## 4. Start services
 
-Install vLLM in a separate environment for local model serving:
-
-```bash
-python3.11 -m venv .venv-serve
-.venv-serve/bin/python -m pip install vllm==0.20.2
-```
-
 ```bash
 bash scripts/start_local_qdrant.sh
 bash scripts/start_model_services.sh all
@@ -71,22 +68,12 @@ bash scripts/start_model_services.sh all
 Qdrant and the embedding endpoint must be ready. Run once for each shared corpus:
 
 ```bash
-bash scripts/build_dataset_indexes.sh web
 bash scripts/build_dataset_indexes.sh browsecompplus
+bash scripts/build_dataset_indexes.sh web
 bash scripts/build_dataset_indexes.sh sec
 ```
 
-## 6. Run a smoke evaluation
-
-Use a few questions before committing to a full benchmark:
-
-```bash
-N_QUERIES=3 PARALLEL=1 bash dataset_runs/run_web.sh
-# Or, after downloading LongSealQA and starting only the policy service:
-N_QUERIES=3 PARALLEL=1 bash dataset_runs/run_longsealqa.sh
-```
-
-## 7. Run the full evaluation
+## 6. Run the full evaluation
 
 `N_QUERIES=0` means every query in the selected split. The defaults are `all` for BrowseComp+/LongSealQA and `test` for Web/SEC.
 
@@ -95,12 +82,6 @@ N_QUERIES=0 bash dataset_runs/run_browsecompplus.sh
 N_QUERIES=0 bash dataset_runs/run_web.sh
 N_QUERIES=0 bash dataset_runs/run_sec.sh
 N_QUERIES=0 bash dataset_runs/run_longsealqa.sh
-```
-
-After all required datasets, indexes, and services are ready, run all four sequentially:
-
-```bash
-bash scripts/run_all.sh
 ```
 
 A custom run can set its budget, concurrency, and result path:
@@ -113,3 +94,9 @@ N_QUERIES=0 MAX_TURNS=40 PARALLEL=4 OUT=outputs/web_full \
 ### Outputs
 
 Each run creates `outputs/<dataset>_<timestamp>/`.
+
+### Acknowledgments
+This repo is built from [pat-jj/harness-1](https://github.com/pat-jj/harness-1).
+### Format retries and turn budget
+
+Malformed policy outputs do not consume `MAX_TURNS`. `MAX_FORMAT_RETRIES` (default 3) limits consecutive format retries; after that, an empty curated set with a non-empty candidate pool triggers a mandatory policy `curate` instead of immediate termination. Otherwise the episode ends with `format_error`. Pending `redirect` and `curate` checkpoints take priority over ordinary format retries, with separate bounded recovery prompts (`MAX_INTENT_REQUIRED_ATTEMPTS=3`, `MAX_CHECKPOINT_CURATE_ATTEMPTS=2`, `MAX_POLICY_CURATE_ATTEMPTS=3`). A committed tool operation resets this counter. Other rejected operations and terminal audits retain their existing turn accounting. Results report `turns` including retries and `budget_turns` for execution-budget usage.

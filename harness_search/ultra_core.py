@@ -752,15 +752,14 @@ class WorkingMemory:
         """Validate an entire curation proposal before committing C_t atomically.
 
         No implicit selection or eviction: additions/removals are policy-owned.
-        Invalid IDs, duplicate operations and capacity overflow leave C_t intact.
+        Invalid IDs, conflicting operations and capacity overflow leave C_t intact.
         """
         def normalize(values, label):
             if not isinstance(values, list) or any(not isinstance(x, str) or not x.strip() for x in values):
                 raise ValueError(f"{label} must be a list of non-empty document IDs")
-            ids = [self._normalize_id(x.strip()) for x in values]
-            if len(ids) != len(set(ids)):
-                raise ValueError(f"Duplicate IDs in {label}")
-            return ids
+            # Retrieval exposes chunk IDs; multiple chunks can name one document.
+            # Collapse aliases after normalization while preserving policy order.
+            return list(dict.fromkeys(self._normalize_id(x.strip()) for x in values))
 
         additions = normalize(add_ids, "add_ids")
         removals = normalize(remove_ids, "remove_ids")
@@ -1147,7 +1146,7 @@ def build_context(
     """
     system_message = (
         SystemContent.new()
-        .with_reasoning_effort(ReasoningEffort.HIGH)
+        .with_reasoning_effort(ReasoningEffort.LOW)
         .with_conversation_start_date("2026-04-01")
     )
     messages = [Message.from_role_and_content(Role.SYSTEM, system_message)]

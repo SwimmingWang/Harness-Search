@@ -19,7 +19,22 @@ if TYPE_CHECKING:
 
 class HarnessSearch:
     def __init__(self, memory: MemoryOperator, auditor: SummaryAuditor,
-                 budget: HarnessBudget | None = None, *, audit_enabled: bool = True):
+                 budget: HarnessBudget | None = None, *, audit_enabled: bool = True,
+                 max_format_retries: int = 3, max_policy_curate_attempts: int = 3,
+                 max_intent_required_attempts: int = 3,
+                 max_checkpoint_curate_attempts: int = 2):
+        if max_format_retries < 0:
+            raise ValueError("max_format_retries must be non-negative")
+        limits = {"recovery_curate": max_policy_curate_attempts,
+                  "redirect": max_intent_required_attempts,
+                  "curate": max_checkpoint_curate_attempts}
+        if any(limit < 1 for limit in limits.values()):
+            raise ValueError("Required-action retry limits must be positive")
+        self.required_retry_limits = limits
+        self.required_retry_counts = {}
+        self.recovery_curate_required = False
+        self.max_format_retries = max_format_retries
+        self.format_retries = 0
         self.memory = memory
         self.auditor = auditor
         self.budget = budget or HarnessBudget()
@@ -46,6 +61,8 @@ class HarnessSearch:
             return frozenset()
         if self.redirect_required:
             return frozenset({"redirect"})
+        if self.recovery_curate_required:
+            return frozenset({"curate"})
         if self.searches_since_curate >= self.budget.searches_per_curation:
             return frozenset({"curate"})
         if self.last_action == "curate":
@@ -81,11 +98,45 @@ class HarnessSearch:
         self.retrieval_required = result.committed
         return result.text
 
-    def reject(self, detail: str) -> OperationResult:
-        """Malformed policy responses also consume T_max, preventing retry loops."""
+    def reject(self, detail: str, *, has_candidates: bool = False,
+               has_curated: bool = False) -> OperationResult:
+        """Legacy format recovery: retry, honor checkpoints, then rescue curation.
+
+        None of these recovery prompts advances the execution-turn budget.
+        Required actions have their own finite retry limits.
+        """
         if self.done:
             raise RuntimeError("The episode has already ended")
-        return self._finish_turn("invalid", detail, False)
+        self.format_retries += 1
+        required = self.required_action
+        branch = None
+        if required == "redirect":
+            branch = "redirect"
+        elif required == "curate":
+            branch = "recovery_curate" if self.recovery_curate_required else "curate"
+        elif self.format_retries > self.max_format_retries:
+            if has_candidates and not has_curated:
+                self.format_retries = 0
+                self.recovery_curate_required = True
+                branch = "recovery_curate"
+            else:
+                self.termination_reason = "format_error"
+        if branch is not None:
+            attempts = self.required_retry_counts.get(branch, 0)
+            if attempts >= self.required_retry_limits[branch]:
+                self.termination_reason = "format_error"
+            else:
+                self.required_retry_counts[branch] = attempts + 1
+                tool = "redirect" if branch == "redirect" else "curate"
+                detail += (f"\nRequired recovery action: {tool}. "
+                           "Select evidence yourself; do not answer or search. "
+                           f"Attempt {attempts + 1}/{self.required_retry_limits[branch]}.")
+        return OperationResult(
+            action="invalid", text=detail, committed=False,
+            metadata={"format_retry": self.format_retries,
+                      "recovery_action": branch},
+            episode_done=self.done, termination_reason=self.termination_reason,
+        )
 
     def step(self, proposal: ActionProposal) -> OperationResult:
         if self.done:
@@ -103,11 +154,18 @@ class HarnessSearch:
             params = copy.deepcopy(proposal.arguments)
 
         if name == "end":
+            self.format_retries = 0
+            self.required_retry_counts.clear()
             return self._audit_end()
 
         result = self.memory.execute(ActionProposal(name, params))
         action = METHOD_ACTIONS[name]
         if result.committed:
+            self.format_retries = 0
+            self.required_retry_counts.clear()
+            if action == "curate" and self.recovery_curate_required:
+                if self.memory.evidence_snapshot().documents:
+                    self.recovery_curate_required = False
             if action == "search":
                 self.search_calls += 1
                 self.searches_since_curate += 1

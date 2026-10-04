@@ -73,6 +73,7 @@ from harness_search.ultra_core import (
     V8D_INTENT_STATE_TRACKING,
     FORMAT_RETRY_PROMPT,
     FORMAT_ERROR_PENALTY,
+    MAX_FORMAT_RETRIES,
     RECENT_K,
     SEARCH_DISPLAY_LIMIT,
     WINDOW_SIZE,
@@ -205,6 +206,10 @@ class HarnessSearchEnv(Env):
             self.memory_operator, self.summary_auditor,
             HarnessBudget(max_turns=max_turns, searches_per_curation=INTENT_SEARCHES_PER_STAGE),
             audit_enabled=V3_JUDGES_ENABLED,
+            max_format_retries=MAX_FORMAT_RETRIES,
+            max_policy_curate_attempts=int(os.environ.get("MAX_POLICY_CURATE_ATTEMPTS", "3")),
+            max_intent_required_attempts=int(os.environ.get("MAX_INTENT_REQUIRED_ATTEMPTS", "3")),
+            max_checkpoint_curate_attempts=int(os.environ.get("MAX_CHECKPOINT_CURATE_ATTEMPTS", "2")),
         )
         self.system_prompt = get_system_prompt(query_text, max_turns=max_turns)
 
@@ -300,7 +305,9 @@ class HarnessSearchEnv(Env):
             # a format failure. Selecting the final occurrence also handles a
             # response that emitted an extra reasoning message first.
             repaired_action = None
-            matches = list(re.finditer(r"to=functions\.([A-Za-z_][A-Za-z0-9_]*)", raw_action))
+            matches = list(re.finditer(
+                r"to=functions\.([A-Za-z_][A-Za-z0-9_]*)", raw_action
+            ))
             if matches:
                 match = matches[-1]
                 tool_name = canonical_tool_name(match.group(1))
@@ -357,15 +364,30 @@ class HarnessSearchEnv(Env):
                 )
                 return self._handle_format_error(str(e))
 
-        if (len(action.tools) != 1 or len(action.params) != 1 or len(action.sources) != 1
-                or isinstance(action.tools[0], UserTextTool)):
+        if len(action.tools) != 1 or len(action.params) != 1 or len(action.sources) != 1:
             return self._handle_format_error("Propose exactly one tool operation per turn")
 
         tool = action.tools[0]
-        name = canonical_tool_name(tool.tool_schema.name)
+        params = action.params[0]
+        if isinstance(tool, UserTextTool):
+            if self.harness.required_action:
+                return self._handle_format_error(
+                    f"Termination requires {self.harness.required_action} first"
+                )
+            if self.wm.get_pool_size() and (
+                not self.wm.curated_ids or self.harness.searches_since_curate > 0
+            ):
+                self.harness.recovery_curate_required = True
+                return self._handle_format_error("Curate retrieved evidence before ending")
+            if "end" not in self.harness.allowed_tools:
+                return self._handle_format_error("Complete the required retrieval before ending")
+            name, params = "end", {}
+            logger.info("final_text_end_request", qid=self.query_id)
+        else:
+            name = canonical_tool_name(tool.tool_schema.name)
         pool_size_before = self.wm.get_pool_size()
         result = await asyncio.to_thread(
-            self.harness.step, ActionProposal(name, action.params[0]),
+            self.harness.step, ActionProposal(name, params),
         )
         builder = ObservationBuilder()
         builder.add_observation(result.text, source=action.sources[0], tool_metadata=result.metadata)
@@ -374,7 +396,7 @@ class HarnessSearchEnv(Env):
         self._all_observations.append(observation)
         self._current_turn = self.harness.turns
         self._total_curate_calls = self.harness.curate_calls
-        self._format_retries = 0
+        self._format_retries = self.harness.format_retries
         has_curate = name == "curate" and result.committed
         self._turns_since_curate = 0 if has_curate else self._turns_since_curate + 1
         if result.committed:
@@ -496,9 +518,18 @@ class HarnessSearchEnv(Env):
     # ── Format Error Handling ──────────────────────────────────────────────
 
     def _handle_format_error(self, error_msg: str) -> StepResult:
-        self._format_retries += 1
-        logger.warning("format_retry", qid=self.query_id, error=error_msg[:200])
-        return self._operation_step_result(self.harness.reject(error_msg))
+        result = self.harness.reject(
+            error_msg, has_candidates=bool(self.wm.pool_ids),
+            has_curated=bool(self.wm.curated_ids),
+        )
+        self._format_retries = self.harness.format_retries
+        logger.warning(
+            "format_error_final" if result.episode_done else "format_retry",
+            qid=self.query_id, error=error_msg[:200],
+            retry=self._format_retries, max_retries=MAX_FORMAT_RETRIES,
+            recovery_action=(result.metadata or {}).get("recovery_action"),
+        )
+        return self._operation_step_result(result)
 
     # ── Tool schemas; dispatch and transitions belong to the harness ────────
 
