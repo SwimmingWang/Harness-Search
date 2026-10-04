@@ -1,6 +1,14 @@
 # Harness-Search
 
-Harness-Search organizes retrieval into a **Proposal–Commit–Audit** loop. A Retrieval Policy proposes actions, a stateful Memory Operator commits evidence, and a Summary Auditor checks whether the retained evidence supports an answer. The repository includes local hybrid retrieval, dataset preparation, index builders, and evaluation on BrowseComp+, Web, SEC, and LongSealQA.
+This repo is official code repo for "Harness-Search: Guiding Long-Horizon Search through Multi-Agent Coordination".
+
+<p align="center">
+  <img src="assets/main_figure.png" width="90%">
+</p>
+
+## 🚀 Update
+
+<strong>2026.10:</strong> We have published the Arxiv version of Harness-Search! Click the buttom above to see our paper!
 
 ## 1. Install the environment
 
@@ -13,18 +21,7 @@ python -m pip install -r requirements.txt
 cp .env.example .env.local
 ```
 
-## 2. Configure models and paths
-
-The example configuration uses one Qwen3.5-27B chat endpoint for the Retrieval Policy, Memory Operator, and Summary Auditor. Embedding and reranking use separate endpoints.
-
-| Service | Default model | Default endpoint |
-|---|---|---|
-| Policy / memory / auditor | `Qwen/Qwen3.5-27B` | `http://127.0.0.1:8000/v1` |
-| Embedding | `Qwen/Qwen3-Embedding-8B` | `http://127.0.0.1:8012/v1` |
-| Reranker | `Qwen/Qwen3-Reranker-8B` | `http://127.0.0.1:8011` |
-| Vector database | Qdrant | `http://127.0.0.1:6333` |
-
-## 3. Prepare datasets
+## 2. Prepare datasets
 
 We use datasets from Huggingface. Login first:
 ```
@@ -35,8 +32,6 @@ Web and SEC query snapshots are included under [`data/`](data/), with questions,
 ```bash
 bash scripts/download_data.sh web sec
 ```
-
-Existing non-empty `data/queries/{web,sec}/test.parquet` files with the required query columns are reused without contacting Hugging Face for queries. Missing queries fall back to bundled snapshots, then Hugging Face. Invalid local files produce an error without overwriting them. Retrieval corpora are still downloaded separately. Explicit query `--upstream`, repository overrides, or pinned revisions bypass local reuse.
 
 Download and prepare BrowseComp+ and LongSealQA data from their upstream releases:
 
@@ -56,14 +51,14 @@ data/
 ├── transfer/longseal_test.parquet
 └── corpora/<dataset>/corpora/<dataset>/<split>/train-*.parquet
 ```
-## 4. Start services
+## 3. Start services
 
 ```bash
 bash scripts/start_local_qdrant.sh
 bash scripts/start_model_services.sh all
 ```
 
-## 5. Build the BM25 index and vector database
+## 4. Build the BM25 index and vector database
 
 Qdrant and the embedding endpoint must be ready. Run once for each shared corpus:
 
@@ -73,7 +68,7 @@ bash scripts/build_dataset_indexes.sh web
 bash scripts/build_dataset_indexes.sh sec
 ```
 
-## 6. Run the full evaluation
+## 5. Run the full evaluation
 
 `N_QUERIES=0` means every query in the selected split. The defaults are `all` for BrowseComp+/LongSealQA and `test` for Web/SEC.
 
@@ -95,8 +90,9 @@ N_QUERIES=0 MAX_TURNS=40 PARALLEL=4 OUT=outputs/web_full \
 
 Each run creates `outputs/<dataset>_<timestamp>/`.
 
-### Acknowledgments
-This repo is built from [pat-jj/harness-1](https://github.com/pat-jj/harness-1).
-### Format retries and turn budget
+<p align="center">
+  <img src="assets/intro_figure.png" width="90%">
+</p>
 
-Malformed policy outputs do not consume `MAX_TURNS`. `MAX_FORMAT_RETRIES` (default 3) limits consecutive format retries; after that, an empty curated set with a non-empty candidate pool triggers a mandatory policy `curate` instead of immediate termination. Otherwise the episode ends with `format_error`. Pending `redirect` and `curate` checkpoints take priority over ordinary format retries, with separate bounded recovery prompts (`MAX_INTENT_REQUIRED_ATTEMPTS=3`, `MAX_CHECKPOINT_CURATE_ATTEMPTS=2`, `MAX_POLICY_CURATE_ATTEMPTS=3`). A committed tool operation resets this counter. Other rejected operations and terminal audits retain their existing turn accounting. Results report `turns` including retries and `budget_turns` for execution-budget usage.
+## Acknowledgments
+This repo is built from [pat-jj/harness-1](https://github.com/pat-jj/harness-1).
