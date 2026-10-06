@@ -101,6 +101,7 @@ Each run creates `outputs/<dataset>_<timestamp>/`.
 ## Acknowledgments
 This repo is built from [pat-jj/harness-1](https://github.com/pat-jj/harness-1).
 
+## 🖊️ Citation
 ```
 @misc{wang2026harnesssearchguidinglonghorizonsearch,
       title={Harness-Search: Guiding Long-Horizon Search through Multi-Agent Coordination}, 
