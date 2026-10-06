@@ -1,6 +1,10 @@
-# Harness-Search
+# Harness-Search: Guiding Long-Horizon Search through Multi-Agent Coordination
 
-This repo is official code repo for "Harness-Search: Guiding Long-Horizon Search through Multi-Agent Coordination".
+Harness-Search is the code repository for paper "Harness-Search: Guiding Long-Horizon Search through Multi-Agent Coordination".
+
+<p align="center">
+  <a href="https://arxiv.org/abs/2610.05382"><img src='https://img.shields.io/badge/arXiv-Paper-red?logo=arxiv&logoColor=white' alt='arXiv'></a>
+</p>
 
 <p align="center">
   <img src="assets/main_figure.png" width="90%">
@@ -96,3 +100,15 @@ Each run creates `outputs/<dataset>_<timestamp>/`.
 
 ## Acknowledgments
 This repo is built from [pat-jj/harness-1](https://github.com/pat-jj/harness-1).
+
+```
+@misc{wang2026harnesssearchguidinglonghorizonsearch,
+      title={Harness-Search: Guiding Long-Horizon Search through Multi-Agent Coordination}, 
+      author={Shanyong Wang and Zhenwen Ji and Lei Jin and Yining Zhao and Yicheng Qian and Chengqiang Lu and Yi Wu and Yao Hu and Lizhen Cui and Yanyu Xu},
+      year={2026},
+      eprint={2610.05382},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2610.05382}, 
+}
+```
